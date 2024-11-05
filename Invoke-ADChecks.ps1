@@ -5,6 +5,8 @@ Performs AD Scan
 .DESCRIPTION
 This script is designed for a single AD forest and is not designed to capture all data for a multiple domain forest.
 Note that if this script is used for a single domain in a multi-domain AD forest, not all elements may be captured.
+This script has been updated to include a request for user credentials. This is intented to allow this script to work
+on systems that are not joined to the Windows Domain or running in the context of an authenticated user.
 
 .PARAMETER DomainName
 Forest Name of your AD
@@ -13,22 +15,27 @@ Forest Name of your AD
 Location to save all output too
 
 .EXAMPLE
-PS>.\Invoke-TrimarcADChecks.ps1
+PS>.\Invoke-ADChecks.ps1
 
 This is the prefer method of running this script, all data will be store at the following location C:\TM\
 .EXAMPLE
-PS>.\Invoke-TrimarcADChecks.ps1 -DomainName ad.vulndomain.corp -RootDir c:\FOLDERPATH
+PS>.\Invoke-ADChecks.ps1 -DomainName ad.vulndomain.corp -RootDir c:\FOLDERPATH
 
 .EXAMPLE
 PS>Set-ExecutionPolicy Bypass -Scope Process -Force 
-PS>.\Invoke-TrimarcADChecks.ps1
+PS>.\Invoke-ADChecks.ps1
 
 .NOTES
-AUTHOR: Sean Metcalf
-AUTHOR EMAIL: sean@trimarcsecurity.com
-COMPANY: Trimarc Security, LLC (Trimarc)
-COPYRIGHT: 2020 - 2023 Trimarc Security, LLC (Trimarc)
-WEBSITE: https://www.TrimarcSecurity.com
+FORK AUTHOR: Don C. Weber (cutaway)
+FORK AUTHOR EMAIL: dev@cutawaysecurity.com
+FORK COMPANY: Cutaway Security, LLC (cutsec)
+FORK COPYRIGHT: 2024 Cutaway Security, LLC (cutsec)
+FORK WEBSITE: https://www.cutawaysecurity.com
+ORIG AUTHOR: Sean Metcalf
+ORIG AUTHOR EMAIL: sean@trimarcsecurity.com
+ORIG COMPANY: Trimarc Security, LLC (Trimarc)
+ORIG COPYRIGHT: 2020 - 2023 Trimarc Security, LLC (Trimarc)
+ORIG WEBSITE: https://www.TrimarcSecurity.com
 
 This script requires the following:
  * PowerShell 5.0 (minimum)
@@ -41,7 +48,10 @@ This script is provided as-is, without support.
 
 Param (
     [string]$DomainName = $env:userdnsdomain,
-    [string]$RootDir = 'C:\TM\'
+    # [string]$RootDir = 'C:\TM\'
+    [string]$RootDir = $env:TEMP + '\ADChecks\',
+    [string]$ReportName = 'ADChecks',
+    [pscredential]$creds = (Get-Credentials -Message "Please provide domain credentials in form 'Domain\Username'")
 )
 
 function Get-ADForestInfo {
@@ -49,8 +59,8 @@ function Get-ADForestInfo {
         $DomainName
     )
 
-    $ADForestFunctionalLevel = (Get-ADForest).ForestMode
-    $ADDomainFunctionalLevel = (Get-ADDomain $DomainName).DomainMode
+    $ADForestFunctionalLevel = (Get-ADForest -Credential $creds).ForestMode
+    $ADDomainFunctionalLevel = (Get-ADDomain -Credential $creds $DomainName).DomainMode
 
     Write-Host "The AD Forest Functional Level is $ADForestFunctionalLevel"
     Write-Host "The AD Domain Functional Level ($DomainName) is $ADDomainFunctionalLevel"
@@ -63,7 +73,7 @@ function Get-DomainControllers {
         $DomainDC
     )
 
-    $DomainDCs = Get-ADDomainController -Filter * -Server $DomainDC
+    $DomainDCs = Get-ADDomainController -Credential $creds -Filter * -Server $DomainDC
     $DomainDCs | Select HostName,OperatingSystem | Format-Table -AutoSize
 
     $DomainDCArray = @()
@@ -73,8 +83,8 @@ function Get-DomainControllers {
         [array]$DomainDCArray += $DomainDCItem
     }
 
-    $DomainDCArray | Sort OperatingSystem | Export-CSV "$ReportDir\TrimarcADChecks-DomainDCs-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainDCs-$DomainName.csv"
+    $DomainDCArray | Sort OperatingSystem | Export-CSV "$ReportDir\$ReportName-DomainDCs-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-DomainDCs-$DomainName.csv"
 }
 
 function Get-TombstoneInfo {
@@ -82,10 +92,10 @@ function Get-TombstoneInfo {
         $DomainDC
     )
 
-    $ADRootDSE = Get-ADRootDSE -Server $DomainDC
+    $ADRootDSE = Get-ADRootDSE -Credential $creds -Server $DomainDC
     $ADConfigurationNamingContext = $ADRootDSE.configurationNamingContext
     
-    $TombstoneObjectInfo = Get-ADObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$ADConfigurationNamingContext" -Partition "$ADConfigurationNamingContext" -Properties * 
+    $TombstoneObjectInfo = Get-ADObject -Credential $creds -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$ADConfigurationNamingContext" -Partition "$ADConfigurationNamingContext" -Properties * 
     [int]$TombstoneLifetime = $TombstoneObjectInfo.tombstoneLifetime
 
     if ($TombstoneLifetime -eq 0) { 
@@ -102,10 +112,10 @@ function Get-ADBackups {
     )
 
     $ContextType = [System.DirectoryServices.ActiveDirectory.DirectoryContextType]::Domain
-    $Context = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext($ContextType,(Get-ADDomain $DomainName).DNSRoot)
+    $Context = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext($ContextType,(Get-ADDomain -Credential $creds $DomainName).DNSRoot)
     $DomainController = [System.DirectoryServices.ActiveDirectory.DomainController]::findOne($Context)
     
-    [string[]]$Partitions = (Get-ADRootDSE -Server $DomainDC).namingContexts
+    [string[]]$Partitions = (Get-ADRootDSE -Credential $creds -Server $DomainDC).namingContexts
     foreach ($Partition in $Partitions) {
         $dsaSignature = $DomainController.GetReplicationMetadata($Partition).Item("dsaSignature")
         Write-Host "$Partition was backed up $($dsaSignature.LastOriginatingChangeTime.DateTime)" 
@@ -119,12 +129,12 @@ function Get-ADTrustInfo {
         $DomainDC
     )
 
-    $ADTrusts = Get-ADTrust -Filter * -Server $DomainDC
+    $ADTrusts = Get-ADTrust -Credential $creds -Filter * -Server $DomainDC
     
     if ($ADTrusts.Count -gt 0) {
         $ADTrusts | Select Source,Target,Direction,IntraForest,SelectiveAuth,SIDFilteringForestAware,SIDFilteringQuarantined | Format-Table -AutoSize
-        $ADTrusts | Export-CSV "$ReportDir\TrimarcADChecks-DomainTrustReport-$DomainName.csv" -NoTypeInformation
-        Write-Host "File save to $ReportDir\TrimarcADChecks-DomainTrustReport-$DomainName.csv" 
+        $ADTrusts | Export-CSV "$ReportDir\$ReportName-DomainTrustReport-$DomainName.csv" -NoTypeInformation
+        Write-Host "File save to $ReportDir\$ReportName-DomainTrustReport-$DomainName.csv" 
     } else {
         Write-Host "No Trust Found"
     }
@@ -147,7 +157,7 @@ function Get-DomainUsers {
         "AdminCount","Created","Modified","LastBadPasswordAttempt","badpwdcount","mail","CanonicalName","DistinguishedName",
         "ServicePrincipalName","SIDHistory","PrimaryGroupID","UserAccountControl","DoesNotRequirePreAuth")
 
-    [array]$DomainUsers = Get-ADUser -Filter * -Property $ADLimitedProperties -Server $DomainDC
+    [array]$DomainUsers = Get-ADUser -Credential $creds -Filter * -Property $ADLimitedProperties -Server $DomainDC
     [array]$DomainEnabledUsers = $DomainUsers | Where {$_.Enabled -eq $True }
     [array]$DomainEnabledInactiveUsers = $DomainEnabledUsers | Where { ($_.LastLogonDate -le $LastLoggedOnDate) -AND ($_.PasswordLastSet -le $PasswordStaleDate) }
     [array]$DomainUsersWithReversibleEncryptionPasswordArray = $DomainUsers | Where { $_.UserAccountControl -band 0x0080 } 
@@ -168,8 +178,8 @@ function Get-DomainUsers {
     Write-Host "Enabled Users With SID History: $($DomainUsersWithSIDHistoryArray.Count)"
     Write-Host "`nReview & clean up as appropriate"
 
-    $DomainUsers | Export-CSV "$ReportDir\TrimarcADChecks-DomainUserReport-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainUserReport-$DomainName.csv" 
+    $DomainUsers | Export-CSV "$ReportDir\$ReportName-DomainUserReport-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-DomainUserReport-$DomainName.csv" 
 }
 
 function Get-DomainPasswordPolicy {
@@ -179,10 +189,10 @@ function Get-DomainPasswordPolicy {
         $DomainDC
     )
 
-    [array]$DomainPasswordPolicy = Get-ADDefaultDomainPasswordPolicy -Server $DomainDC
+    [array]$DomainPasswordPolicy = Get-ADDefaultDomainPasswordPolicy -Credential $creds -Server $DomainDC
     $DomainPasswordPolicy | Format-List
-    $DomainPasswordPolicy | Export-CSV "$ReportDir\TrimarcADChecks-DomainPasswordPolicy-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainUserReport-$DomainName.csv" 
+    $DomainPasswordPolicy | Export-CSV "$ReportDir\$ReportName-DomainPasswordPolicy-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-DomainUserReport-$DomainName.csv" 
 }
 
 function Get-DomainAdminUser {
@@ -194,10 +204,10 @@ function Get-DomainAdminUser {
     )
 
     $ADLimitedProperties = @("Name","Enabled","Created","PasswordLastSet","LastLogonDate","ServicePrincipalName","SID")
-    $DomainDefaultAdminAccount = Get-ADUser "$($ADDomainInfo.DomainSID)-500" -Server $DomainDC -Properties $ADLimitedProperties
+    $DomainDefaultAdminAccount = Get-ADUser -Credential $creds "$($ADDomainInfo.DomainSID)-500" -Server $DomainDC -Properties $ADLimitedProperties
     $DomainDefaultAdminAccount | Select $ADLimitedProperties | Format-List
-    $DomainDefaultAdminAccount | Export-CSV "$ReportDir\TrimarcADChecks-DomainDefaultAdminAccount-$DomainName.csv" -NoTypeInformation 
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainDefaultAdminAccount-$DomainName.csv" 
+    $DomainDefaultAdminAccount | Export-CSV "$ReportDir\$ReportName-DomainDefaultAdminAccount-$DomainName.csv" -NoTypeInformation 
+    Write-Host "File save to $ReportDir\$ReportName-DomainDefaultAdminAccount-$DomainName.csv" 
 }
 
 function Get-KRBTGT {
@@ -207,10 +217,10 @@ function Get-KRBTGT {
         $DomainDC
     )
 
-    $DomainKRBTGTAccount = Get-ADUser 'krbtgt' -Server $DomainDC -Properties DistinguishedName,'msds-keyversionnumber',Created,PasswordLastSet    
+    $DomainKRBTGTAccount = Get-ADUser -Credential $creds 'krbtgt' -Server $DomainDC -Properties DistinguishedName,'msds-keyversionnumber',Created,PasswordLastSet    
     $DomainKRBTGTAccount | Select DistinguishedName,Created,PasswordLastSet,'msds-keyversionnumber' | Format-Table -AutoSize
-    $DomainKRBTGTAccount | Export-CSV "$ReportDir\TrimarcADChecks-DomainKRBTGTAccount-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainKRBTGTAccount-$DomainName.csv" 
+    $DomainKRBTGTAccount | Export-CSV "$ReportDir\$ReportName-DomainKRBTGTAccount-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-DomainKRBTGTAccount-$DomainName.csv" 
 }
 
 function Get-ADAdmins {
@@ -221,13 +231,13 @@ function Get-ADAdmins {
     )
 
     $ADAdminArray = @()
-    $ADAdminMembers = Get-ADGroupMember Administrators -Recursive -Server $DomainDC
+    $ADAdminMembers = Get-ADGroupMember -Credential $creds Administrators -Recursive -Server $DomainDC
     foreach ($ADAdminMemberItem in $ADAdminMembers) { 
         try {
             Switch ($ADAdminMemberItem.objectClass) {
-                'User' { [array]$ADAdminArray += Get-ADUser $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet,ServicePrincipalName -Server $DomainDC }
-                'Computer' { [array]$ADAdminArray += Get-ADComputer $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC }
-                'msDS-GroupManagedServiceAccount' { [array]$ADAdminArray += Get-ADServiceAccount $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC}
+                'User' { [array]$ADAdminArray += Get-ADUser -Credential $creds $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet,ServicePrincipalName -Server $DomainDC }
+                'Computer' { [array]$ADAdminArray += Get-ADComputer -Credential $creds $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC }
+                'msDS-GroupManagedServiceAccount' { [array]$ADAdminArray += Get-ADServiceAccount -Credential $creds $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC}
             }
         } catch {
             Write-Warning "The security principal member ($ADAdminMemberItem) may be in another domain or is unreachable" ; $ADAdminArray += $ADAdminMemberItem
@@ -235,8 +245,8 @@ function Get-ADAdmins {
     }
 
     $ADAdminArray | sort PasswordLastSet | Select name,DistinguishedName,PasswordLastSet,LastLogonDate,ObjectClass | Format-Table -AutoSize
-    $ADAdminArray | Export-CSV "$ReportDir\TrimarcADChecks-ADAdminAccountReport-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-ADAdminAccountReport-$DomainName.csv" 
+    $ADAdminArray | Export-CSV "$ReportDir\$ReportName-ADAdminAccountReport-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-ADAdminAccountReport-$DomainName.csv" 
 }
 
 function Get-SPNs {
@@ -247,13 +257,13 @@ function Get-SPNs {
     )
 
     $ADAdminArray = @()
-    $ADAdminMembers = Get-ADGroupMember Administrators -Recursive -Server $DomainDC
+    $ADAdminMembers = Get-ADGroupMember -Credential $creds Administrators -Recursive -Server $DomainDC
     foreach ($ADAdminMemberItem in $ADAdminMembers) { 
         try {
             Switch ($ADAdminMemberItem.objectClass) {
-                'User' { [array]$ADAdminArray += Get-ADUser $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet,ServicePrincipalName -Server $DomainDC }
-                'Computer' { [array]$ADAdminArray += Get-ADComputer $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC }
-                'msDS-GroupManagedServiceAccount' { [array]$ADAdminArray += Get-ADServiceAccount $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC}
+                'User' { [array]$ADAdminArray += Get-ADUser -Credential $creds $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet,ServicePrincipalName -Server $DomainDC }
+                'Computer' { [array]$ADAdminArray += Get-ADComputer -Credential $creds $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC }
+                'msDS-GroupManagedServiceAccount' { [array]$ADAdminArray += Get-ADServiceAccount -Credential $creds $ADAdminMemberItem -Properties LastLogonDate,PasswordLastSet -Server $DomainDC}
             }
         } catch {
             Write-Warning "The security principal member ($ADAdminMemberItem) may be in another domain or is unreachable" ; $ADAdminArray += $ADAdminMemberItem
@@ -261,8 +271,8 @@ function Get-SPNs {
     }
 
     $ADAdminArray | Where {$_.ServicePrincipalName} | Select name,DistinguishedName,ServicePrincipalName | Format-Table -AutoSize
-    $ADAdminArray | Where {$_.ServicePrincipalName} | Export-CSV "$ReportDir\TrimarcADChecks-ADAdminSPNReport-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-ADAdminSPNReport-$DomainName.csv" 
+    $ADAdminArray | Where {$_.ServicePrincipalName} | Export-CSV "$ReportDir\$ReportName-ADAdminSPNReport-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-ADAdminSPNReport-$DomainName.csv" 
 }
 
 function Get-ProtectedUsers {
@@ -272,10 +282,10 @@ function Get-ProtectedUsers {
         $DomainDC
     )
 
-    $ProtectedUsersGroupMembership = Get-ADGroupMember 'Protected Users' -Server $DomainDC
+    $ProtectedUsersGroupMembership = Get-ADGroupMember -Credential $creds 'Protected Users' -Server $DomainDC
     $ProtectedUsersGroupMembership | Select name,DistinguishedName,objectClass | Format-Table
-    $ProtectedUsersGroupMembership | Export-CSV "$ReportDir\TrimarcADChecks-ProtectedUsersGroupMembershipReport-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-ProtectedUsersGroupMembershipReport-$DomainName.csv" 
+    $ProtectedUsersGroupMembership | Export-CSV "$ReportDir\$ReportName-ProtectedUsersGroupMembershipReport-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-ProtectedUsersGroupMembershipReport-$DomainName.csv" 
 }
 
 function Get-UsersFromGroup {
@@ -290,11 +300,11 @@ function Get-UsersFromGroup {
     try { 
         Write-Host "`n$GroupName Group:" -Fore Cyan
 
-        $ADPrivGroupItemGroupMembership = Get-ADGroupMember $GroupName -Server $DomainDC 
+        $ADPrivGroupItemGroupMembership = Get-ADGroupMember -Credential $creds $GroupName -Server $DomainDC 
         if ($ADPrivGroupItemGroupMembership.count -ge 1) {
             $ADPrivGroupItemGroupMembership | Select name,DistinguishedName,objectClass | Format-Table
-            $ADPrivGroupItemGroupMembership | Export-CSV "$ReportDir\TrimarcADChecks-PrivGroups-$DomainName-$GroupName.csv" -NoTypeInformation
-            Write-Host "File save to $ReportDir\TrimarcADChecks-PrivGroups-$DomainName-$GroupName.csv"
+            $ADPrivGroupItemGroupMembership | Export-CSV "$ReportDir\$ReportName-PrivGroups-$DomainName-$GroupName.csv" -NoTypeInformation
+            Write-Host "File save to $ReportDir\$ReportName-PrivGroups-$DomainName-$GroupName.csv"
          } else { 
              Write-Host "No members"
          }
@@ -329,12 +339,12 @@ function Get-DomainPrivilegedADGroups {
     )
    
     foreach ($GroupName in $GroupNames) {
-        Get-UsersFromGroup -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -GroupName $GroupName
+        Get-UsersFromGroup -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -GroupName $GroupName
     }
 
-    [array]$GroupNames = Get-ADGroup -filter {Name -like "*VMWare*"}  -Server $DomainDC
+    [array]$GroupNames = Get-ADGroup -Credential $creds -filter {Name -like "*VMWare*"}  -Server $DomainDC
     foreach ($GroupName in $GroupNames) {
-        Get-UsersFromGroup -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -GroupName $GroupName
+        Get-UsersFromGroup -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -GroupName $GroupName
     }
 }
 
@@ -350,7 +360,7 @@ function Get-KerberosDelegation {
     
 
     $KerberosDelegationArray = @()
-    [array]$KerberosDelegationObjects = Get-ADObject -filter {((UserAccountControl -BAND 0x0080000) -OR (UserAccountControl -BAND 0x1000000) -OR (msDS-AllowedToDelegateTo -like '*') -OR (msDS-AllowedToActOnBehalfOfOtherIdentity -like '*')) -AND (PrimaryGroupID -ne '516') -AND (PrimaryGroupID -ne '521') } -Server $DomainDC -Properties $ADLimitedProperties -SearchBase $DomainDN 
+    [array]$KerberosDelegationObjects = Get-ADObject -Credential $creds -filter {((UserAccountControl -BAND 0x0080000) -OR (UserAccountControl -BAND 0x1000000) -OR (msDS-AllowedToDelegateTo -like '*') -OR (msDS-AllowedToActOnBehalfOfOtherIdentity -like '*')) -AND (PrimaryGroupID -ne '516') -AND (PrimaryGroupID -ne '521') } -Server $DomainDC -Properties $ADLimitedProperties -SearchBase $DomainDN 
 
     foreach ($KerberosDelegationObjectItem in $KerberosDelegationObjects) {
         if ($KerberosDelegationObjectItem.UserAccountControl -BAND 0x0080000) { 
@@ -381,8 +391,8 @@ function Get-KerberosDelegation {
     }
 
     $KerberosDelegationArray | Sort DelegationType | Select DistinguishedName,DelegationType,Name,ServicePrincipalName | Format-Table -AutoSize
-    $KerberosDelegationArray | Sort DelegationType | Export-CSV "$ReportDir\TrimarcADChecks-KerberosDelegationReport-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-KerberosDelegationReport-$DomainName.csv" 
+    $KerberosDelegationArray | Sort DelegationType | Export-CSV "$ReportDir\$ReportName-KerberosDelegationReport-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-KerberosDelegationReport-$DomainName.csv" 
 }
 
 function Get-NameForGUID{
@@ -394,7 +404,7 @@ function Get-NameForGUID{
     )
     Begin{
         if (!$ForestDNSName) { 
-            $ForestDNSName = (Get-ADForest $ForestDNSName).Name 
+            $ForestDNSName = (Get-ADForest -Credential $creds $ForestDNSName).Name 
         }
 
         if ($ForestDNSName -notlike "*=*") { 
@@ -443,14 +453,14 @@ function Get-DomainPermissions {
         $ForestDNSName
     )
 
-    $ForestDomainObjectData = Get-ADObject $ADDomainInfo.DistinguishedName -Properties * -Server $DomainDC
+    $ForestDomainObjectData = Get-ADObject -Credential $creds $ADDomainInfo.DistinguishedName -Properties * -Server $DomainDC
     $ForestDomainObjectSecurityData = $ForestDomainObjectData.nTSecurityDescriptor.Access
     
     $ForestDomainObjectPermissions = @()
 
     foreach ($ForestDomainObjectSecurityDataItem in $ForestDomainObjectSecurityData) {
-        $ObjectTypeName = Get-NameForGUID $ForestDomainObjectSecurityDataItem.ObjectType -ForestDNSName $ForestDNSName
-        $InheritedObjectTypeName = Get-NameForGUID $ForestDomainObjectSecurityDataItem.InheritedObjectType -ForestDNSName $ForestDNSName
+        $ObjectTypeName = Get-NameForGUID -Credential $creds $ForestDomainObjectSecurityDataItem.ObjectType -ForestDNSName $ForestDNSName
+        $InheritedObjectTypeName = Get-NameForGUID -Credential $creds $ForestDomainObjectSecurityDataItem.InheritedObjectType -ForestDNSName $ForestDNSName
 
         $ForestDomainObjectSecurityDataItem | Add-Member -MemberType NoteProperty -Name Domain -Value $DomainName -Force
         $ForestDomainObjectSecurityDataItem | Add-Member -MemberType NoteProperty -Name ObjectTypeName -Value $ObjectTypeName -Force
@@ -461,8 +471,8 @@ function Get-DomainPermissions {
 
     $ForestDomainObjectPermissions | Sort IdentityReference | Select IdentityReference,ActiveDirectoryRights,InheritedObjectTypeName,ObjectTypeName,`
     InheritanceType,ObjectFlags,AccessControlType,IsInherited,InheritanceFlags,PropagationFlags,ObjectType,InheritedObjectType | `
-    Export-CSV "$ReportDir\TrimarcADChecks-DomainRootPermissionReport-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainRootPermissionReport-$DomainName.csv" 
+    Export-CSV "$ReportDir\$ReportName-DomainRootPermissionReport-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-DomainRootPermissionReport-$DomainName.csv" 
 }
 
 function Get-DuplicateSPNs {
@@ -473,8 +483,8 @@ function Get-DuplicateSPNs {
 
     $SetSPN = SetSPN -X -F | Where {$_ -notlike "Processing entry*"}
     $SetSPN
-    $SetSPN | Out-File "$ReportDir\TrimarcADChecks-ADForestDuplicateSPNReport-$DomainName.txt"
-    Write-Host "File save to $ReportDir\TrimarcADChecks-ADForestDuplicateSPNReport-$DomainName.csv" 
+    $SetSPN | Out-File "$ReportDir\$ReportName-ADForestDuplicateSPNReport-$DomainName.txt"
+    Write-Host "File save to $ReportDir\$ReportName-ADForestDuplicateSPNReport-$DomainName.csv" 
 }
 
 function Get-SYSVOLcpassword {
@@ -485,8 +495,8 @@ function Get-SYSVOLcpassword {
 
     $GPPPasswordData = findstr /S /I cpassword "\\$DomainName\SYSVOL\$DomainName\Policies\*.xml"
     $GPPPasswordData
-    $GPPPasswordData | Out-File "$ReportDir\TrimarcADChecks-GPPPasswordDataReport-$DomainName.txt"
-    Write-Host "File save to $ReportDir\TrimarcADChecks-GPPPasswordDataReport-$DomainName.csv" 
+    $GPPPasswordData | Out-File "$ReportDir\$ReportName-GPPPasswordDataReport-$DomainName.txt"
+    Write-Host "File save to $ReportDir\$ReportName-GPPPasswordDataReport-$DomainName.csv" 
 }
 
 function Get-GPOOwners {
@@ -495,10 +505,10 @@ function Get-GPOOwners {
         $DomainName
     )
 
-    [Array]$DomainGPOs = Get-GPO -All -Domain $DomainName
+    [Array]$DomainGPOs = Get-GPO -Credential $creds -All -Domain $DomainName
     $DomainGPOs | Select DisplayName,Owner | Format-Table -AutoSize
-    $DomainGPOs | Out-File "$ReportDir\TrimarcADChecks-DomainGPOData-$DomainName.csv"
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainGPOData-$DomainName.csv"
+    $DomainGPOs | Out-File "$ReportDir\$ReportName-DomainGPOData-$DomainName.csv"
+    Write-Host "File save to $ReportDir\$ReportName-DomainGPOData-$DomainName.csv"
 }
 
 function Get-GPOPermissions {
@@ -507,10 +517,10 @@ function Get-GPOPermissions {
         $DomainName
     )
 
-    [Array]$DomainGPOs = Get-GPO -All -Domain $DomainName
+    [Array]$DomainGPOs = Get-GPO -Credential $creds -All -Domain $DomainName
     $GPOPermissions = foreach ($DomainGPO in $DomainGPOs)
     {
-        Get-GPPermissions -Guid $DomainGPO.Id -All | Where {$_.Trustee.SidType.ToString() -ne "WellKnownGroup"} | Select `
+        Get-GPPermissions -Credential $creds -Guid $DomainGPO.Id -All | Where {$_.Trustee.SidType.ToString() -ne "WellKnownGroup"} | Select `
         @{n='GPOName';e={$DomainGPO.DisplayName}},
         @{n='AccountName';e={$_.Trustee.Name}},
         @{n='AccountType';e={$_.Trustee.SidType.ToString()}},
@@ -518,8 +528,8 @@ function Get-GPOPermissions {
     }
 
     $GPOPermissions | Format-Table
-    $GPOPermissions | Export-CSV "$ReportDir\TrimarcADChecks-DomainGPOPermissions-$DomainName.csv" -NoTypeInformation
-    Write-Host "File save to $ReportDir\TrimarcADChecks-DomainGPOPermissions-$DomainName.csv"
+    $GPOPermissions | Export-CSV "$ReportDir\$ReportName-DomainGPOPermissions-$DomainName.csv" -NoTypeInformation
+    Write-Host "File save to $ReportDir\$ReportName-DomainGPOPermissions-$DomainName.csv"
 }
 
 # Import Modules
@@ -537,13 +547,13 @@ New-Item -Type Directory -Path $ReportDir -Force | Out-Null
 
 # Log File
 $TimeVal = Get-Date -UFormat '%Y-%m-%d-%H-%M'
-Start-Transcript "$ReportDir\InvokeTrimarcADChecks-LogFile.txt" -Force
+Start-Transcript "$ReportDir\Invoke$ReportName-LogFile.txt" -Force
 
-if (!$DomainName) { $DomainName = (Get-ADDomain).DNSRoot } 
+if (!$DomainName) { $DomainName = (Get-ADDomain -Credential $creds).DNSRoot } 
 
 ## Get AD Forest
-$ADForestInfo = Get-ADForest
-$ADDomainInfo = Get-ADDomain $DomainName
+$ADForestInfo = Get-ADForest -Credential $creds
+$ADDomainInfo = Get-ADDomain -Credential $creds $DomainName
 $DomainDC = $ADDomainInfo.PDCEmulator 
 
 Write-Host "Starting AD Discovery & Checks" -Fore Cyan
@@ -561,78 +571,78 @@ $ADForestName = $ADForestInfo.RootDomain
 $DomainDN = $ADDomainInfo.DistinguishedName
 
 Write-Host "`nForest Name: $ADForestName" -Fore Cyan
-Get-ADForestInfo -DomainName $DomainName
+Get-ADForestInfo -Credential $creds -DomainName $DomainName
 
 ## Get Domain Controllers 
 Write-Host "`nAD Forest Domain Controllers:" -Fore Cyan
-Get-DomainControllers -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-DomainControllers -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Tombstone Lifetime
 Write-Host "`nThe AD Forest Tombstone lifetime:" -Fore Cyan
-Get-TombstoneInfo -DomainDC $DomainDC
+Get-TombstoneInfo -Credential $creds -DomainDC $DomainDC
 
 ## AD Backups
 Write-Host "`nDetermining last supported backup of AD partitions:" -ForegroundColor Cyan
-Get-ADBackups -DomainName $DomainName -DomainDC $DomainDC
+Get-ADBackups -Credential $creds -DomainName $DomainName -DomainDC $DomainDC
 
 ## AD Trusts
 Write-Host "`nActive Directory Trusts:" -Fore Cyan
-Get-ADTrustInfo -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-ADTrustInfo -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Get Domain User Information
 Write-Host "`nDomain User Report:" -ForegroundColor Cyan
-Get-DomainUsers -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -UserLogonAge $UserLogonAge -UserPasswordAge $UserPasswordAge
+Get-DomainUsers -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -UserLogonAge $UserLogonAge -UserPasswordAge $UserPasswordAge
 
 ## Domain Password Policy
 Write-Host "`nDomain Password Policy:" -Fore Cyan
-Get-DomainPasswordPolicy -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-DomainPasswordPolicy -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Default Domain Administrator Account 
 Write-Host "`nDefault Domain Administrator Account:" -Fore Cyan
-Get-DomainAdminUser -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -ADDomainInfo $ADDomainInfo
+Get-DomainAdminUser -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -ADDomainInfo $ADDomainInfo
 
 ## KRBTGT Account Password
 Write-Host "`nDomain Kerberos Service Account (KRBTGT):" -Fore Cyan
-Get-KRBTGT -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-KRBTGT -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Identify AD Admins
 Write-Host "`nAD Admins:" -Fore Cyan
-Get-ADAdmins -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-ADAdmins -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Identify AD Admins with SPNs
 Write-Host "`nAD Admin Accounts with SPNs:" -Fore Cyan
-Get-SPNs -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-SPNs -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Protected Users group membership, compare with AD Admins
 Write-Host "`nDomain Protected Users Group Membership:" -Fore Cyan
-Get-ProtectedUsers -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-ProtectedUsers -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
 
 ## Discover Default privileged group membership
-Get-DomainPrivilegedADGroups -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
+Get-DomainPrivilegedADGroups -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC
     
 ## Identify Accounts with Kerberos Delegation
 Write-Host "`nDomain Accounts with Kerberos Delegation:" -Fore Cyan
-Get-KerberosDelegation -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -DomainDN $DomainDN
+Get-KerberosDelegation -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -DomainDN $DomainDN
 
 ## Get Domain Permissions
 Write-Host "`nGathering Domain Permissions:" -Fore Cyan
-Get-DomainPermissions -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -ForestDNSName $ForestDNSName
+Get-DomainPermissions -Credential $creds -ReportDir $ReportDir -DomainName $DomainName -DomainDC $DomainDC -ForestDNSName $ForestDNSName
 
 ## Duplicate SPNs
 Write-Host "`nAD Forest Duplicate SPN Report:" -Fore Cyan
-Get-DuplicateSPNs -ReportDir $ReportDir -DomainName $DomainName
+Get-DuplicateSPNs -Credential $creds -ReportDir $ReportDir -DomainName $DomainName
 
 ## Scan SYSVOL for Group Policy Preference Passwords
 Write-Host "`nSYSVOL Scan for Group Policy Preference Passwords:" -Fore Cyan
-Get-SYSVOLcpassword -ReportDir $ReportDir -DomainName $DomainName
+Get-SYSVOLcpassword -Credential $creds -ReportDir $ReportDir -DomainName $DomainName
 
 ## Get GPO Owners
 Write-Host "`nGPO Owners:" -Fore Cyan
-Get-GPOOwners -ReportDir $ReportDir -DomainName $DomainName
+Get-GPOOwners -Credential $creds -ReportDir $ReportDir -DomainName $DomainName
 
 ## Get GPO Permissions
 Write-Host "`nGPO Permissions:" -Fore Cyan
-Get-GPOPermissions -ReportDir $ReportDir -DomainName $DomainName
+Get-GPOPermissions -Credential $creds -ReportDir $ReportDir -DomainName $DomainName
 
 #####
 $EndMessageText = 
